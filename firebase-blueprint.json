@@ -1,0 +1,126 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user's MINA AI profile, social links, and AI companion preferences.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID of the owner." },
+        "displayName": { "type": "string", "description": "User's preferred display name." },
+        "bio": { "type": "string", "description": "Short personal bio." },
+        "privateNote": { "type": "string", "description": "Encrypted or private personal details." },
+        "avatarUri": { "type": "string", "description": "Local or profile photo URI." },
+        "youtubeUrl": { "type": "string", "description": "YouTube channel URL." },
+        "instagramUrl": { "type": "string", "description": "Instagram profile URL." },
+        "socialUrl": { "type": "string", "description": "Additional social link." },
+        "musicUrl": { "type": "string", "description": "Preferred music or artist link." },
+        "personality": { "type": "string", "enum": ["GIRLFRIEND", "BEST_FRIEND", "PROFESSIONAL", "CARING", "TEACHER", "COACH"] },
+        "emotionLevel": { "type": "integer", "description": "Emotion intensity from 1 to 5." },
+        "language": { "type": "string", "enum": ["HINGLISH", "HINDI", "ENGLISH"] },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp of creation." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp of last update." }
+      },
+      "required": ["userId", "displayName", "personality", "emotionLevel", "language", "createdAt", "updatedAt"]
+    },
+    "MemoryItem": {
+      "title": "MemoryItem",
+      "description": "User-approved memory or preference saved in Creator Hub.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "content": { "type": "string" },
+        "category": { "type": "string", "enum": ["PREFERENCE", "CONVERSATION", "PERSONAL", "GOAL"] },
+        "encrypted": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "title", "content", "category", "encrypted", "createdAt", "updatedAt"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Single conversation turn between user and MINA AI.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "role": { "type": "string", "enum": ["USER", "MINA"] },
+        "text": { "type": "string" },
+        "personality": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "role", "text", "personality", "createdAt", "updatedAt"]
+    },
+    "JournalEntry": {
+      "title": "JournalEntry",
+      "description": "Personal diary and mood journal entry.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "content": { "type": "string" },
+        "mood": { "type": "string", "enum": ["HAPPY", "CALM", "EXCITED", "TIRED", "STRESSED", "GRATEFUL"] },
+        "encrypted": { "type": "boolean" },
+        "aiReflection": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "title", "content", "mood", "encrypted", "createdAt", "updatedAt"]
+    },
+    "SavedDocument": {
+      "title": "SavedDocument",
+      "description": "Resume, biodata, letter, or code prototype saved by user.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "docType": { "type": "string", "enum": ["RESUME", "BIODATA", "LETTER", "CODE", "NOTE"] },
+        "content": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "title", "docType", "content", "createdAt", "updatedAt"]
+    },
+    "FavoritePlace": {
+      "title": "FavoritePlace",
+      "description": "Saved favorite location from Location / Where Am I.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "name": { "type": "string" },
+        "address": { "type": "string" },
+        "latitude": { "type": "number" },
+        "longitude": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "name", "address", "latitude", "longitude", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Authenticated user's profile and MINA companion configuration."
+    },
+    "/users/{userId}/memories/{memoryId}": {
+      "schema": { "$ref": "#/entities/MemoryItem" },
+      "description": "Creator Hub saved memories."
+    },
+    "/users/{userId}/chats/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Real-time AI chat history."
+    },
+    "/users/{userId}/journals/{entryId}": {
+      "schema": { "$ref": "#/entities/JournalEntry" },
+      "description": "Daily mood and diary journal entries."
+    },
+    "/users/{userId}/documents/{docId}": {
+      "schema": { "$ref": "#/entities/SavedDocument" },
+      "description": "Generated resumes, biodata, letters, and code artifacts."
+    },
+    "/users/{userId}/places/{placeId}": {
+      "schema": { "$ref": "#/entities/FavoritePlace" },
+      "description": "Saved favorite places for navigation."
+    }
+  }
+}
