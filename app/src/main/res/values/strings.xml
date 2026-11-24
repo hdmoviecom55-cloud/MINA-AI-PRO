@@ -15,4 +15,24 @@
     <string name="cd_mic">Toggle microphone</string>
     <string name="cd_camera">Capture photo</string>
     <string name="ai_disclaimer">MINA AI is an artificial intelligence companion, not a real human.</string>
+    <string name="journal_title">Private Journal</string>
+    <string name="journal_subtitle">Daily Diary, Moods &amp; Encrypted Vault</string>
+    <string name="journal_new_entry">New Entry</string>
+    <string name="journal_cd_add">Add new journal entry</string>
+    <string name="journal_search_hint">Search entries by title or content</string>
+    <string name="journal_empty_title">Your journal is waiting</string>
+    <string name="journal_empty_body">Tap the New Entry button below to write down your thoughts, reflections, or daily wins. MINA can reply warmly and keep entries AES-256 encrypted.</string>
+    <string name="journal_no_matches">No journal entries match your current search or mood filter.</string>
+    <string name="journal_dialog_title">New Journal Entry</string>
+    <string name="journal_field_title">Title (optional)</string>
+    <string name="journal_field_body">Write your thoughts…</string>
+    <string name="journal_encrypt_label">Encrypt Entry (AES-256)</string>
+    <string name="journal_delete_title">Delete Journal Entry?</string>
+    <string name="journal_delete_message">This entry will be permanently removed from your journal.</string>
+    <string name="journal_format_bold">Bold</string>
+    <string name="journal_format_italic">Italic</string>
+    <string name="journal_format_bullet">Bullet list</string>
+    <string name="journal_mode_write">Write</string>
+    <string name="journal_mode_preview">Preview</string>
+    <string name="journal_format_hint">Tip: Select text and tap B, I, or Bullet list</string>
 </resources>

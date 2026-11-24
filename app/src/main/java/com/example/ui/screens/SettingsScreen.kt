@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Verified
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -42,10 +43,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.size
+import com.example.core.AppCheckDiagnostics
 import com.example.data.model.AppSettingsState
 import com.example.data.model.CodeSyntaxStyle
 import com.example.data.model.MinaLanguage
 import com.example.data.model.MinaPersonality
+import com.example.data.model.UiState
 import com.example.data.model.UserProfile
 import com.example.ui.components.AmberGradientButton
 import com.example.ui.components.GlassCard
@@ -58,6 +62,9 @@ fun SettingsScreen(
     profile: UserProfile,
     settings: AppSettingsState,
     availableVoices: List<String>,
+    appCheckDiagnostics: AppCheckDiagnostics,
+    backendTestState: UiState<String>?,
+    onTestBackendConnection: () -> Unit,
     onUpdateSettings: ((AppSettingsState) -> AppSettingsState) -> Unit,
     onUpdateTone: (MinaPersonality, Int, MinaLanguage) -> Unit,
     onNavigate: (String) -> Unit,
@@ -151,6 +158,66 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+
+                        val tokenStatusText = when {
+                            appCheckDiagnostics.isTokenVerified -> "Verified"
+                            appCheckDiagnostics.lastError != null -> "Attention Needed"
+                            else -> "Ready (On-Demand)"
+                        }
+                        Text(
+                            text = "App Check: ${appCheckDiagnostics.providerMode.label} • $tokenStatusText",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (appCheckDiagnostics.lastError != null) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                palette.goldHighlight
+                            }
+                        )
+                        appCheckDiagnostics.lastError?.let { err ->
+                            Text(
+                                text = err,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+
+                        OutlinedButton(
+                            onClick = onTestBackendConnection,
+                            enabled = backendTestState !is UiState.Loading,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("settings_test_connection_button")
+                        ) {
+                            if (backendTestState is UiState.Loading) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text("Testing App Check & Gemini...")
+                            } else {
+                                Text("Test Gemini & App Check")
+                            }
+                        }
+
+                        when (backendTestState) {
+                            is UiState.Success -> {
+                                Text(
+                                    text = "Live Reply: ${backendTestState.data}",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = palette.goldHighlight
+                                )
+                            }
+                            is UiState.Error -> {
+                                Text(
+                                    text = backendTestState.message,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
+                            else -> Unit
+                        }
 
                         SettingsToggleRow(
                             title = "Hey Mina Wake Word",

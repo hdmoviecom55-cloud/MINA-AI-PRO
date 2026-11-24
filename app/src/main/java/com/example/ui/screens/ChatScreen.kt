@@ -38,9 +38,13 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -95,7 +99,10 @@ fun ChatScreen(
     streamingReply: String?,
     isBusy: Boolean,
     chatError: String?,
+    canRetry: Boolean,
     onSendMessage: (String, Boolean) -> Unit,
+    onRetryLastMessage: () -> Unit,
+    onTestReply: () -> Unit,
     onVoiceInput: ((String) -> Unit) -> Unit,
     onSpeakText: (String) -> Unit,
     onClearChat: () -> Unit,
@@ -167,7 +174,7 @@ fun ChatScreen(
                 }
             )
 
-            // Quick conversation starter chips
+            // Quick conversation starter chips + real Gemini Test Reply
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -175,6 +182,30 @@ fun ChatScreen(
                     .padding(horizontal = 16.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                GlassCard(
+                    modifier = Modifier.testTag("chat_test_reply_button"),
+                    cornerRadius = 50.dp,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 7.dp),
+                    onClick = { onTestReply() }
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.VerifiedUser,
+                            contentDescription = "Test Reply",
+                            tint = palette.goldHighlight,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = if (isBusy) "Testing..." else "Test Reply",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = palette.goldHighlight
+                        )
+                    }
+                }
                 listOf(
                     "Kaise ho Mina?",
                     "Aaj ka plan banayein?",
@@ -203,11 +234,36 @@ fun ChatScreen(
                         .padding(horizontal = 16.dp, vertical = 6.dp),
                     contentPadding = PaddingValues(12.dp)
                 ) {
-                    Text(
-                        text = chatError,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.error
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = chatError,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(end = 8.dp)
+                        )
+                        if (canRetry) {
+                            TextButton(
+                                onClick = onRetryLastMessage,
+                                enabled = !isBusy,
+                                colors = ButtonDefaults.textButtonColors(contentColor = palette.goldHighlight),
+                                modifier = Modifier.testTag("chat_retry_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Refresh,
+                                    contentDescription = "Retry message",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text("Retry", fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                    }
                 }
             }
 
@@ -351,11 +407,19 @@ fun ChatScreen(
                         .testTag("chat_send_button"),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.Send,
-                        contentDescription = stringResource(R.string.cd_send),
-                        tint = Color(0xFF1A0E07)
-                    )
+                    if (isBusy) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.2.dp,
+                            color = Color(0xFF1A0E07)
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Send,
+                            contentDescription = stringResource(R.string.cd_send),
+                            tint = Color(0xFF1A0E07)
+                        )
+                    }
                 }
             }
         }

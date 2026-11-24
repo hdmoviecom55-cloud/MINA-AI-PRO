@@ -2,5 +2,7 @@
   "name": "MINA AI",
   "description": "MINA AI – Your Personal AI Companion featuring Hinglish and English voice assistant, AI chat, Live Vision, Creator Hub, Documents, Coding, Study, Music, Journal, Location, and Phone Control.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

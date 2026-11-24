@@ -6,6 +6,8 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.core.AmbientAudioPlayer
+import com.example.core.AppCheckDiagnostics
+import com.example.core.AppCheckManager
 import com.example.core.CryptoVault
 import com.example.core.PdfAndExportHelper
 import com.example.core.VoiceEngine
@@ -25,8 +27,10 @@ import com.example.data.model.SavedDocument
 import com.example.data.model.UiState
 import com.example.data.model.UserProfile
 import com.example.data.preferences.SettingsDataStore
+import com.example.data.repository.MinaAiErrorClassifier
 import com.example.data.repository.MinaAiRepository
 import com.example.data.repository.MinaFirestoreRepository
+import com.google.firebase.Timestamp
 import com.google.firebase.firestore.FirebaseFirestoreException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
@@ -37,11 +41,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.UUID
 
 class MinaViewModel(
     application: Application,
@@ -81,8 +85,21 @@ class MinaViewModel(
     val memoriesState: StateFlow<UiState<List<MemoryItem>>> = firestoreRepo.observeMemories(currentUserId)
         .toUiStateFlow("Failed to load memories")
 
-    val chatsState: StateFlow<UiState<List<ChatMessage>>> = firestoreRepo.observeChats(currentUserId)
+    private val firestoreChatsState: StateFlow<UiState<List<ChatMessage>>> = firestoreRepo.observeChats(currentUserId)
         .toUiStateFlow("Failed to load chats")
+
+    private val _localChatMessages = MutableStateFlow<List<ChatMessage>>(emptyList())
+
+    val chatsState: StateFlow<UiState<List<ChatMessage>>> = combine(
+        firestoreChatsState,
+        _localChatMessages
+    ) { remoteUi, localList ->
+        when (remoteUi) {
+            is UiState.Loading -> if (localList.isNotEmpty()) UiState.Success(localList) else UiState.Loading
+            is UiState.Error -> UiState.Success(localList)
+            is UiState.Success -> UiState.Success(mergeChatMessages(remoteUi.data, localList))
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
     val journalsState: StateFlow<UiState<List<JournalEntry>>> = firestoreRepo.observeJournals(currentUserId)
         .toUiStateFlow("Failed to load journals")
@@ -105,6 +122,16 @@ class MinaViewModel(
 
     private val _chatError = MutableStateFlow<String?>(null)
     val chatError: StateFlow<String?> = _chatError.asStateFlow()
+
+    private val _lastFailedChatRequest = MutableStateFlow<Pair<String, Boolean>?>(null)
+    val canRetryLastChat: StateFlow<Boolean> = _lastFailedChatRequest
+        .map { it != null }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), false)
+
+    val appCheckDiagnostics: StateFlow<AppCheckDiagnostics> = AppCheckManager.diagnostics
+
+    private val _backendTestState = MutableStateFlow<UiState<String>?>(null)
+    val backendTestState: StateFlow<UiState<String>?> = _backendTestState.asStateFlow()
 
     private val _lastVoiceResponse = MutableStateFlow("")
     val lastVoiceResponse: StateFlow<String> = _lastVoiceResponse.asStateFlow()
@@ -206,10 +233,101 @@ class MinaViewModel(
 
     fun sendChatMessage(text: String, speakAloud: Boolean = false) {
         val clean = text.trim()
-        if (clean.isEmpty() || _isChatBusy.value) return
+        if (clean.isEmpty()) return
+        if (_isChatBusy.value) {
+            _toastMessage.value = "MINA is still replying. Please wait a moment."
+            return
+        }
+        launchChatRequest(clean = clean, speakAloud = speakAloud, appendUserBubble = true)
+    }
+
+    fun retryLastChatMessage() {
+        val pending = _lastFailedChatRequest.value ?: return
+        if (_isChatBusy.value) return
+        val existing = currentChats()
+        val alreadyShowsPrompt = existing.lastOrNull()?.let {
+            it.role == "USER" && it.text.trim() == pending.first
+        } == true
+        launchChatRequest(
+            clean = pending.first,
+            speakAloud = pending.second,
+            appendUserBubble = !alreadyShowsPrompt
+        )
+    }
+
+    fun sendTestReplyInChat() {
+        if (_isChatBusy.value) {
+            _toastMessage.value = "MINA is busy with a reply. Please wait."
+            return
+        }
+        val testPrompt = "Test reply: Verify MINA AI, App Check, and Gemini backend."
         viewModelScope.launch {
             _isChatBusy.value = true
             _chatError.value = null
+            _lastFailedChatRequest.value = testPrompt to false
+            _streamingReply.value = "Verifying App Check & contacting Gemini..."
+            voiceEngine.setThinking()
+
+            val profile = currentProfile()
+            val settings = settingsState.value
+
+            appendLocalChatMessage("USER", testPrompt, profile.personality)
+            if (settings.rememberConversations) {
+                val writeRes = firestoreRepo.addChatMessage("USER", testPrompt, profile.personality)
+                if (writeRes.isFailure) {
+                    Log.w(TAG, "Could not persist test user message to Firestore", writeRes.exceptionOrNull())
+                }
+            }
+
+            try {
+                val result = aiRepo.runTestReply(profile)
+                val reply = result.getOrElse { throw it }
+                _streamingReply.value = null
+                _lastFailedChatRequest.value = null
+                _lastVoiceResponse.value = reply
+
+                appendLocalChatMessage("MINA", reply, profile.personality)
+                if (settings.rememberConversations) {
+                    val replyWriteRes = firestoreRepo.addChatMessage("MINA", reply, profile.personality)
+                    if (replyWriteRes.isFailure) {
+                        Log.w(TAG, "Could not persist test reply to Firestore", replyWriteRes.exceptionOrNull())
+                    }
+                }
+                voiceEngine.setReady()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Test reply in chat failed", e)
+                _streamingReply.value = null
+                voiceEngine.setReady()
+                _chatError.value = MinaAiErrorClassifier.classify(e)
+            } finally {
+                _isChatBusy.value = false
+            }
+        }
+    }
+
+    fun runBackendConnectionTest() {
+        if (_backendTestState.value is UiState.Loading) return
+        viewModelScope.launch {
+            _backendTestState.value = UiState.Loading
+            val res = aiRepo.runTestReply(currentProfile())
+            _backendTestState.value = res.fold(
+                onSuccess = { UiState.Success(it) },
+                onFailure = { UiState.Error(MinaAiErrorClassifier.classify(it)) }
+            )
+        }
+    }
+
+    private fun launchChatRequest(
+        clean: String,
+        speakAloud: Boolean,
+        appendUserBubble: Boolean
+    ) {
+        viewModelScope.launch {
+            _isChatBusy.value = true
+            _chatError.value = null
+            _lastFailedChatRequest.value = clean to speakAloud
             _streamingReply.value = ""
             voiceEngine.setThinking()
 
@@ -218,8 +336,14 @@ class MinaViewModel(
             val historySnapshot = currentChats()
             val memories = if (settings.rememberConversations) currentMemories() else emptyList()
 
-            if (settings.rememberConversations) {
-                firestoreRepo.addChatMessage("USER", clean, profile.personality)
+            if (appendUserBubble) {
+                appendLocalChatMessage("USER", clean, profile.personality)
+                if (settings.rememberConversations) {
+                    val userWriteRes = firestoreRepo.addChatMessage("USER", clean, profile.personality)
+                    if (userWriteRes.isFailure) {
+                        Log.w(TAG, "Could not persist user message to Firestore", userWriteRes.exceptionOrNull())
+                    }
+                }
             }
 
             try {
@@ -236,9 +360,17 @@ class MinaViewModel(
                 }
 
                 _streamingReply.value = null
+                _lastFailedChatRequest.value = null
                 _lastVoiceResponse.value = finalReply
-                if (settings.rememberConversations && finalReply.isNotBlank()) {
-                    firestoreRepo.addChatMessage("MINA", finalReply, profile.personality)
+
+                if (finalReply.isNotBlank()) {
+                    appendLocalChatMessage("MINA", finalReply, profile.personality)
+                    if (settings.rememberConversations) {
+                        val minaWriteRes = firestoreRepo.addChatMessage("MINA", finalReply, profile.personality)
+                        if (minaWriteRes.isFailure) {
+                            Log.w(TAG, "Could not persist MINA reply to Firestore", minaWriteRes.exceptionOrNull())
+                        }
+                    }
                 }
 
                 if (speakAloud && finalReply.isNotBlank()) {
@@ -254,24 +386,64 @@ class MinaViewModel(
                 Log.e(TAG, "Chat timed out", e)
                 _streamingReply.value = null
                 voiceEngine.setReady()
-                _chatError.value = "MINA response timed out after 60 seconds. Please try again."
+                _chatError.value = "MINA response timed out after 60 seconds. Tap Retry to send again."
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Chat AI failed", e)
                 _streamingReply.value = null
                 voiceEngine.setReady()
-                _chatError.value = e.localizedMessage ?: "Failed to reach MINA AI."
+                _chatError.value = MinaAiErrorClassifier.classify(e)
             } finally {
                 _isChatBusy.value = false
             }
         }
     }
 
+    private fun appendLocalChatMessage(role: String, text: String, personality: String) {
+        val item = ChatMessage(
+            id = "local_${UUID.randomUUID()}",
+            userId = currentUserId,
+            role = role,
+            text = text,
+            personality = personality,
+            createdAt = Timestamp.now(),
+            updatedAt = Timestamp.now()
+        )
+        _localChatMessages.value = _localChatMessages.value + item
+    }
+
+    private fun mergeChatMessages(
+        remote: List<ChatMessage>,
+        local: List<ChatMessage>
+    ): List<ChatMessage> {
+        if (local.isEmpty()) return remote
+        if (remote.isEmpty()) return local
+        val remainingRemoteCounts = mutableMapOf<String, Int>()
+        for (msg in remote) {
+            val key = "${msg.role}|${msg.text.trim()}"
+            remainingRemoteCounts[key] = (remainingRemoteCounts[key] ?: 0) + 1
+        }
+        val unsyncedLocal = mutableListOf<ChatMessage>()
+        for (msg in local) {
+            val key = "${msg.role}|${msg.text.trim()}"
+            val count = remainingRemoteCounts[key] ?: 0
+            if (count > 0) {
+                remainingRemoteCounts[key] = count - 1
+            } else {
+                unsyncedLocal.add(msg)
+            }
+        }
+        return if (unsyncedLocal.isEmpty()) remote else remote + unsyncedLocal
+    }
+
     fun clearChatHistory() {
         viewModelScope.launch {
+            _localChatMessages.value = emptyList()
+            _chatError.value = null
+            _lastFailedChatRequest.value = null
             val res = firestoreRepo.clearChats()
-            _toastMessage.value = if (res.isSuccess) "Chat history cleared" else "Could not clear chat"
+            _toastMessage.value = if (res.isSuccess) "Chat history cleared" else "Cleared local chat (cloud clear pending)"
         }
     }
 

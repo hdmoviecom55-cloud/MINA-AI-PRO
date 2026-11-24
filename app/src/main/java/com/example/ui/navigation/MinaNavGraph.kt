@@ -169,6 +169,9 @@ private fun MinaAuthenticatedApp(viewModel: MinaViewModel) {
     val streamingReply by viewModel.streamingReply.collectAsStateWithLifecycle()
     val isChatBusy by viewModel.isChatBusy.collectAsStateWithLifecycle()
     val chatError by viewModel.chatError.collectAsStateWithLifecycle()
+    val canRetryLastChat by viewModel.canRetryLastChat.collectAsStateWithLifecycle()
+    val appCheckDiagnostics by viewModel.appCheckDiagnostics.collectAsStateWithLifecycle()
+    val backendTestState by viewModel.backendTestState.collectAsStateWithLifecycle()
     val lastVoiceResponse by viewModel.lastVoiceResponse.collectAsStateWithLifecycle()
     val visionState by viewModel.visionState.collectAsStateWithLifecycle()
     val docGenState by viewModel.docGenState.collectAsStateWithLifecycle()
@@ -246,7 +249,10 @@ private fun MinaAuthenticatedApp(viewModel: MinaViewModel) {
                     streamingReply = streamingReply,
                     isBusy = isChatBusy,
                     chatError = chatError,
+                    canRetry = canRetryLastChat,
                     onSendMessage = viewModel::sendChatMessage,
+                    onRetryLastMessage = viewModel::retryLastChatMessage,
+                    onTestReply = viewModel::sendTestReplyInChat,
                     onVoiceInput = { callback -> viewModel.startVoiceListening(callback) },
                     onSpeakText = { viewModel.voiceEngine.speak(it) },
                     onClearChat = viewModel::clearChatHistory,
@@ -294,6 +300,9 @@ private fun MinaAuthenticatedApp(viewModel: MinaViewModel) {
                     profile = profile,
                     settings = settings,
                     availableVoices = availableVoices,
+                    appCheckDiagnostics = appCheckDiagnostics,
+                    backendTestState = backendTestState,
+                    onTestBackendConnection = viewModel::runBackendConnectionTest,
                     onUpdateSettings = viewModel::updateSettings,
                     onUpdateTone = viewModel::updateCompanionTone,
                     onNavigate = { navigateTop(it) },

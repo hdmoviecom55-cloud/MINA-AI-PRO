@@ -2,6 +2,8 @@ package com.example.data.repository
 
 import android.graphics.Bitmap
 import android.util.Log
+import com.example.core.AppCheckManager
+import com.example.core.AppCheckProviderMode
 import com.example.data.model.ChatMessage
 import com.example.data.model.DocumentType
 import com.example.data.model.MemoryItem
@@ -22,14 +24,132 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 
+data class NormalizedChatTurn(
+    val role: String,
+    val text: String
+)
+
+object MinaChatHistoryFormatter {
+
+    /**
+     * Converts persisted [ChatMessage] history into valid, strictly alternating
+     * ("user", "model") pairs ending on a "model" turn so `startChat(history)` +
+     * `sendMessageStream(currentUserMessage)` never violates Gemini turn ordering.
+     */
+    fun normalizeChatHistory(
+        history: List<ChatMessage>,
+        currentUserMessage: String = "",
+        maxTurns: Int = 12
+    ): List<NormalizedChatTurn> {
+        val merged = mutableListOf<NormalizedChatTurn>()
+
+        for (msg in history.takeLast(maxTurns + 6)) {
+            val cleanText = msg.text.trim()
+            if (cleanText.isEmpty()) continue
+            val role = if (msg.role.equals("USER", ignoreCase = true)) "user" else "model"
+
+            val last = merged.lastOrNull()
+            if (last != null && last.role == role) {
+                if (last.text != cleanText) {
+                    merged[merged.lastIndex] = last.copy(text = "${last.text}\n$cleanText")
+                }
+            } else {
+                merged.add(NormalizedChatTurn(role = role, text = cleanText))
+            }
+        }
+
+        // Gemini chat history must start with a user turn.
+        while (merged.firstOrNull()?.role == "model") {
+            merged.removeAt(0)
+        }
+
+        // Drop a trailing user turn whether it duplicates the just-sent message (Firestore race)
+        // or came from an unanswered prior message, so history ends cleanly on a "model" turn.
+        if (merged.lastOrNull()?.role == "user") {
+            merged.removeAt(merged.lastIndex)
+        }
+
+        val capped = if (merged.size > maxTurns) {
+            merged.takeLast(maxTurns).toMutableList()
+        } else {
+            merged
+        }
+
+        while (capped.firstOrNull()?.role == "model") {
+            capped.removeAt(0)
+        }
+        if (capped.lastOrNull()?.role == "user") {
+            capped.removeAt(capped.lastIndex)
+        }
+
+        return capped
+    }
+}
+
+object MinaAiErrorClassifier {
+
+    fun isAppCheckRelated(error: Throwable): Boolean {
+        val combined = collectErrorChainText(error).lowercase()
+        return combined.contains("app check") ||
+            combined.contains("appcheck") ||
+            combined.contains("attestation failed") ||
+            combined.contains("403")
+    }
+
+    fun classify(
+        error: Throwable,
+        providerMode: AppCheckProviderMode = AppCheckManager.diagnostics.value.providerMode
+    ): String {
+        if (error is TimeoutCancellationException) {
+            return "MINA response timed out after 60 seconds. Check your internet connection and retry."
+        }
+        val combined = collectErrorChainText(error)
+        val lower = combined.lowercase()
+
+        return when {
+            isAppCheckRelated(error) -> {
+                AppCheckManager.classifyAppCheckError(error, providerMode)
+            }
+            lower.contains("429") || lower.contains("quota") || lower.contains("resource_exhausted") || lower.contains("rate limit") ->
+                "Gemini rate limit or quota reached temporarily. Please wait a moment and retry."
+            lower.contains("unable to resolve host") ||
+                lower.contains("failed to connect") ||
+                lower.contains("network") ||
+                lower.contains("unknownhost") ||
+                lower.contains("sockettimeout") ||
+                lower.contains("timed out") ->
+                "Network connection failed while reaching MINA's Gemini backend. Check internet and tap Retry."
+            lower.contains("404") || lower.contains("not found") && lower.contains("model") ->
+                "Configured Gemini model is unavailable on Firebase AI Logic backend."
+            lower.contains("permission_denied") || lower.contains("api has not been used") ->
+                "Firebase AI Logic API permission denied for this project. Verify Firebase AI Logic provisioning."
+            else -> error.localizedMessage?.takeIf { it.isNotBlank() }
+                ?: "Unable to reach MINA AI right now. Please try again."
+        }
+    }
+
+    private fun collectErrorChainText(error: Throwable): String {
+        val sb = StringBuilder()
+        var current: Throwable? = error
+        var depth = 0
+        while (current != null && depth < 8) {
+            sb.append(current::class.java.simpleName).append(' ')
+            current.message?.let { sb.append(it).append(' ') }
+            current = current.cause
+            depth++
+        }
+        return sb.toString()
+    }
+}
+
 class MinaAiRepository {
 
     private val generalModel by lazy {
-        Firebase.ai.generativeModel("gemini-3.8-flash")
+        Firebase.ai.generativeModel(DEFAULT_MODEL)
     }
 
     private val fastModel by lazy {
-        Firebase.ai.generativeModel("gemini-3.5-flash-lite")
+        Firebase.ai.generativeModel(FAST_MODEL)
     }
 
     private val quizModel by lazy {
@@ -52,7 +172,7 @@ class MinaAiRepository {
             )
         )
         Firebase.ai.generativeModel(
-            modelName = "gemini-3.8-flash",
+            modelName = DEFAULT_MODEL,
             generationConfig = generationConfig {
                 responseMimeType = "application/json"
                 responseSchema = quizSchema
@@ -70,7 +190,8 @@ class MinaAiRepository {
 
     private fun buildSystemPrompt(
         profile: UserProfile,
-        memories: List<MemoryItem>
+        memories: List<MemoryItem>,
+        extraInstruction: String = ""
     ): String {
         val personality = MinaPersonality.fromRaw(profile.personality)
         val language = MinaLanguage.fromRaw(profile.language)
@@ -91,7 +212,44 @@ class MinaAiRepository {
             User Memories for helpful context:
             $memoryBlock
             Keep responses concise, natural, well-structured, and conversational unless asked for detailed output.
+            ${if (extraInstruction.isNotBlank()) extraInstruction else ""}
         """.trimIndent()
+    }
+
+    private suspend fun ensureValidAppCheck(forceRefresh: Boolean): Unit {
+        val result = AppCheckManager.verifyAppCheckToken(forceRefresh = forceRefresh)
+        if (result.isFailure) {
+            val err = result.exceptionOrNull()
+                ?: IllegalStateException("Firebase App Check token verification failed.")
+            throw err
+        }
+    }
+
+    private suspend fun <T> executeWithAppCheck(
+        forceRefreshInitially: Boolean = false,
+        block: suspend () -> T
+    ): T {
+        ensureValidAppCheck(forceRefresh = forceRefreshInitially)
+        return try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (!forceRefreshInitially && MinaAiErrorClassifier.isAppCheckRelated(e)) {
+                Log.w(TAG, "AI call hit App Check error; refreshing App Check token and retrying once.", e)
+                try {
+                    ensureValidAppCheck(forceRefresh = true)
+                    return block()
+                } catch (retryError: CancellationException) {
+                    throw retryError
+                } catch (retryError: Exception) {
+                    Log.e(TAG, "AI retry after App Check refresh failed", retryError)
+                    throw IllegalStateException(MinaAiErrorClassifier.classify(retryError), retryError)
+                }
+            }
+            Log.e(TAG, "AI request failed", e)
+            throw IllegalStateException(MinaAiErrorClassifier.classify(e), e)
+        }
     }
 
     fun streamChatReply(
@@ -101,35 +259,84 @@ class MinaAiRepository {
         memories: List<MemoryItem>,
         keepChatting: Boolean
     ): Flow<String> = flow {
-        val systemInstruction = buildSystemPrompt(profile, memories)
         val extraPrompt = if (keepChatting) {
-            "\nAfter answering, optionally add one brief, natural follow-up question to keep the conversation flowing."
+            "After answering, optionally add one brief, natural follow-up question to keep the conversation flowing."
         } else ""
 
-        val recentHistory = mutableListOf<Content>()
-        recentHistory.add(content("user") { text("System context for this conversation:\n$systemInstruction$extraPrompt\nPlease acknowledge silently and follow these instructions in all replies.") })
-        recentHistory.add(content("model") { text("Samajh gayi! Main MINA AI hoon aur aapke saath hoon.") })
+        val systemText = buildSystemPrompt(profile, memories, extraPrompt)
+        val systemInstructionContent = content { text(systemText) }
+        val normalizedHistory: List<Content> = MinaChatHistoryFormatter
+            .normalizeChatHistory(history, userMessage)
+            .map { turn -> content(turn.role) { text(turn.text) } }
 
-        history.takeLast(12).forEach { msg ->
-            val role = if (msg.role == "USER") "user" else "model"
-            if (msg.text.isNotBlank()) {
-                recentHistory.add(content(role) { text(msg.text) })
-            }
-        }
+        val chatModel = Firebase.ai.generativeModel(
+            modelName = DEFAULT_MODEL,
+            systemInstruction = systemInstructionContent
+        )
 
-        val chat = generalModel.startChat(history = recentHistory)
-        val accumulated = StringBuilder()
-        withTimeout(60_000L) {
-            chat.sendMessageStream(userMessage).collect { chunk ->
-                val part = chunk.text.orEmpty()
-                if (part.isNotEmpty()) {
-                    accumulated.append(part)
-                    emit(accumulated.toString())
+        var emittedAnyChunk = false
+        suspend fun runStreamAttempt(forceRefreshToken: Boolean) {
+            ensureValidAppCheck(forceRefresh = forceRefreshToken)
+            val chat = chatModel.startChat(history = normalizedHistory)
+            val accumulated = StringBuilder()
+            withTimeout(60_000L) {
+                chat.sendMessageStream(userMessage.trim()).collect { chunk ->
+                    val part = chunk.text.orEmpty()
+                    if (part.isNotEmpty()) {
+                        emittedAnyChunk = true
+                        accumulated.append(part)
+                        emit(accumulated.toString())
+                    }
                 }
             }
+            if (accumulated.isBlank()) {
+                throw IllegalStateException("MINA returned an empty response. Please try again.")
+            }
         }
-        if (accumulated.isBlank()) {
-            throw IllegalStateException("MINA returned an empty response. Please try again.")
+
+        try {
+            runStreamAttempt(forceRefreshToken = false)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (!emittedAnyChunk && MinaAiErrorClassifier.isAppCheckRelated(e)) {
+                Log.w(TAG, "Chat stream hit App Check error; forcing token refresh and retrying once.", e)
+                try {
+                    runStreamAttempt(forceRefreshToken = true)
+                    return@flow
+                } catch (retryError: CancellationException) {
+                    throw retryError
+                } catch (retryError: Exception) {
+                    Log.e(TAG, "Chat stream retry after App Check refresh failed", retryError)
+                    throw IllegalStateException(MinaAiErrorClassifier.classify(retryError), retryError)
+                }
+            }
+            Log.e(TAG, "Chat stream failed", e)
+            throw IllegalStateException(MinaAiErrorClassifier.classify(e), e)
+        }
+    }
+
+    suspend fun runTestReply(profile: UserProfile): Result<String> {
+        return try {
+            val reply = executeWithAppCheck(forceRefreshInitially = true) {
+                val systemContent = content { text(buildSystemPrompt(profile, emptyList())) }
+                val model = Firebase.ai.generativeModel(
+                    modelName = FAST_MODEL,
+                    systemInstruction = systemContent
+                )
+                val prompt = "Connection test for ${profile.displayName}: please reply with one brief friendly sentence confirming MINA AI is connected and ready."
+                val response = withTimeout(60_000L) {
+                    model.generateContent(prompt)
+                }
+                response.text?.takeIf { it.isNotBlank() }
+                    ?: throw IllegalStateException("Gemini backend returned an empty test response.")
+            }
+            Result.success(reply)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Test reply failed", e)
+            Result.failure(IllegalStateException(MinaAiErrorClassifier.classify(e), e))
         }
     }
 
@@ -138,14 +345,16 @@ class MinaAiRepository {
         profile: UserProfile,
         memories: List<MemoryItem> = emptyList(),
         useFastModel: Boolean = false
-    ): String {
-        val systemInstruction = buildSystemPrompt(profile, memories)
-        val fullPrompt = "$systemInstruction\n\nTask:\n$prompt"
-        val targetModel = if (useFastModel) fastModel else generalModel
+    ): String = executeWithAppCheck {
+        val systemContent = content { text(buildSystemPrompt(profile, memories)) }
+        val targetModel = Firebase.ai.generativeModel(
+            modelName = if (useFastModel) FAST_MODEL else DEFAULT_MODEL,
+            systemInstruction = systemContent
+        )
         val response = withTimeout(60_000L) {
-            targetModel.generateContent(fullPrompt)
+            targetModel.generateContent(prompt)
         }
-        return response.text?.takeIf { it.isNotBlank() }
+        response.text?.takeIf { it.isNotBlank() }
             ?: throw IllegalStateException("Empty response from AI.")
     }
 
@@ -153,7 +362,7 @@ class MinaAiRepository {
         bitmap: Bitmap,
         taskPrompt: String,
         profile: UserProfile
-    ): String {
+    ): String = executeWithAppCheck {
         val scaled = scaleBitmapSafely(bitmap, 1280)
         val language = MinaLanguage.fromRaw(profile.language)
         val prompt = """
@@ -170,7 +379,7 @@ class MinaAiRepository {
                 }
             )
         }
-        return response.text?.takeIf { it.isNotBlank() }
+        response.text?.takeIf { it.isNotBlank() }
             ?: throw IllegalStateException("Could not extract visual insight from the image.")
     }
 
@@ -178,7 +387,7 @@ class MinaAiRepository {
         docType: DocumentType,
         details: String,
         profile: UserProfile
-    ): String {
+    ): String = executeWithAppCheck {
         val language = MinaLanguage.fromRaw(profile.language)
         val prompt = """
             Create a polished, ready-to-use ${docType.label} for ${profile.displayName}.
@@ -190,7 +399,7 @@ class MinaAiRepository {
         val response = withTimeout(60_000L) {
             generalModel.generateContent(prompt)
         }
-        return response.text?.takeIf { it.isNotBlank() }
+        response.text?.takeIf { it.isNotBlank() }
             ?: throw IllegalStateException("Document generation returned empty output.")
     }
 
@@ -198,7 +407,7 @@ class MinaAiRepository {
         mode: String,
         languageOrStack: String,
         userPrompt: String
-    ): String {
+    ): String = executeWithAppCheck {
         val prompt = """
             You are MINA Coding Studio.
             Mode: $mode
@@ -210,14 +419,14 @@ class MinaAiRepository {
         val response = withTimeout(60_000L) {
             generalModel.generateContent(prompt)
         }
-        return response.text?.takeIf { it.isNotBlank() }
+        response.text?.takeIf { it.isNotBlank() }
             ?: throw IllegalStateException("Code generation returned empty output.")
     }
 
     suspend fun generateStudyQuiz(
         topic: String,
         language: MinaLanguage
-    ): List<QuizQuestion> {
+    ): List<QuizQuestion> = executeWithAppCheck {
         val prompt = """
             Generate 4 high-quality multiple-choice quiz questions on the topic: "$topic".
             Language style: ${language.displayName}.
@@ -244,7 +453,7 @@ class MinaAiRepository {
                 )
             )
         }
-        return list
+        list
     }
 
     suspend fun generateJournalReflection(
@@ -283,5 +492,7 @@ class MinaAiRepository {
 
     companion object {
         private const val TAG = "MinaAiRepository"
+        const val DEFAULT_MODEL = "gemini-3.8-flash"
+        const val FAST_MODEL = "gemini-3.5-flash-lite"
     }
 }
